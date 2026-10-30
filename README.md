@@ -1,4 +1,4 @@
-﻿# sv-topic-screener — Multi-modal Short-Video Topic Screener
+# sv-topic-screener — Multi-modal Short-Video Topic Screener
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
