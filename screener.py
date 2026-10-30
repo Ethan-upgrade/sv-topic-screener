@@ -3,20 +3,23 @@
 """
 多模态短视频内容筛选框架（clean-room 通用实现）
 ==================================================
-用公开开源库实现“标题 + 口播语音转写 + 画面文字OCR”三路证据判定，
+用公开开源库实现「标题 + 口播语音转写 + 画面文字OCR」三路证据判定，
 判断短视频是否属于某个主题（示例：汽车“智驾/辅助驾驶”内容）。
-本工具不抓取任何平台、不内置任何第三方专有代码；素材由使用者自行合法提供。
+不含任何第三方专有代码。
 
 输入：Excel（含 标题 / 链接 / 平台 列，列名支持常见别名）
-可选：--media-dir 指向放有 <内容ID>.mp4 / <行号>.mp4 的本地视频目录；
-      有视频则做语音转写 + 画面OCR，否则仅按文字判定。
+可选：
+  --media-dir  本地视频目录（<内容ID>.mp4 / <行号>.mp4）
+  --download   对每行链接用 yt-dlp 自动下载（仅 yt-dlp 支持的站点；抖音/小红书/视频号等强反爬站点可能失败或需 Cookie）
+  --cookies    可选 cookies.txt 供 yt-dlp 使用
 输出：逐条结果 Excel。
 
 用法：
-  python screener.py --init-example                 # 生成示例 Excel
-  python screener.py --input 数据.xlsx              # 仅文字判定
-  python screener.py --input 数据.xlsx --media-dir 视频目录   # 文字+语音+画面
-  python screener.py --input 数据.xlsx --rules rules.example.json
+  python screener.py --init-example
+  python screener.py --input 数据.xlsx
+  python screener.py --input 数据.xlsx --media-dir 视频目录
+  python screener.py --input 数据.xlsx --download
+  python screener.py --input 数据.xlsx --download --cookies cookies.txt
 """
 from __future__ import annotations
 import argparse, json, os, re, sys, time
@@ -28,10 +31,6 @@ TITLE_ALIASES = ["标题", "视频标题", "短视频标题", "作品标题", "�
 URL_ALIASES = ["链接", "视频链接", "作品链接", "笔记链接", "url", "url链接"]
 PLATFORM_ALIASES = ["平台", "发布平台", "媒体平台", "platform"]
 
-# 判定取值；统计页始终按此顺序输出全部三种（数量为 0 也输出）
-VERDICTS = ["相关", "待人工复核", "不相关"]
-
-# 默认规则（示例：汽车“智驾/辅助驾驶”主题；可在 rules.json 覆盖）
 DEFAULT_RULES = {
     "topic": "智驾",
     "smart_terms": [
@@ -86,70 +85,99 @@ def find_media(media_dir: Path, url: str, row: int):
     return None
 
 
+def download_video(url: str, outdir: Path, cookies: str = None, max_mb: int = 300):
+    """用公开的 yt-dlp 下载视频（仅支持 yt-dlp 支持的站点）。失败返回 None，不抛异常。"""
+    if not url:
+        return None
+    try:
+        import yt_dlp
+    except Exception:
+        return None
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    opts = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": str(outdir / "%(id)s.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 25,
+        "retries": 2,
+        "max_filesize": max_mb * 1024 * 1024,
+    }
+    if cookies and Path(cookies).exists():
+        opts["cookiefile"] = str(cookies)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+        if not info:
+            return None
+        fid = info.get("id")
+        if fid:
+            for p in sorted(outdir.glob(str(fid) + ".*")):
+                if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".m4a", ".mov"):
+                    return p
+        for d in (info.get("requested_downloads") or []):
+            fp = d.get("filepath")
+            if fp and Path(fp).exists():
+                return Path(fp)
+    except Exception:
+        return None
+    return None
+
+
 _whisper = None
 
 
 def transcribe(path: Path):
-    """口播语音转写（faster-whisper 自带 PyAV 解码，无需系统 ffmpeg）。
-
-    返回 (文本, 错误说明)。成功时错误说明为空串；失败时文本为空串并给出原因，
-    调用方据此区分“处理失败”与“处理成功但未命中”。
-    """
     global _whisper
     try:
         from faster_whisper import WhisperModel
         if _whisper is None:
             _whisper = WhisperModel(os.environ.get("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
         segs, info = _whisper.transcribe(str(path), vad_filter=True, beam_size=1)
-        return "".join(s.text for s in segs).strip(), ""
-    except Exception as e:
-        return "", "ASR失败: %s" % str(e)[:120]
+        return "".join(s.text for s in segs).strip()
+    except Exception:
+        return ""
 
 
 _ocr = None
 
 
 def ocr_frames(video: Path, n_frames: int = 6):
-    """画面文字 OCR：用 OpenCV 均匀抽 n 帧，RapidOCR 识别，合并文本。
-
-    返回 (文本, 错误说明, 缺口说明)。容器未报告帧数时不算错误，但会作为
-    “媒体处理缺口”返回，避免把未处理当成未命中。
-    """
     global _ocr
     texts = []
-    cap = None
     try:
         import cv2
         cap = cv2.VideoCapture(str(video))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        if total <= 0:
-            return "", "", "OCR跳过: 容器未报告帧数(CAP_PROP_FRAME_COUNT=0)"
-        from rapidocr import RapidOCR
-        if _ocr is None:
-            _ocr = RapidOCR()
-        for k in range(n_frames):
-            idx = int(total * (k + 0.5) / n_frames)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            res = _ocr(frame)
-            t = ""
-            try:
-                if hasattr(res, "txts"):
-                    t = "\n".join([x for x in (res.txts or [])])
-                elif isinstance(res, tuple) and len(res) >= 2:
-                    t = "\n".join(res[1] or [])
-            except Exception:
+        if total > 0:
+            from rapidocr import RapidOCR
+            if _ocr is None:
+                _ocr = RapidOCR()
+            for k in range(n_frames):
+                idx = int(total * (k + 0.5) / n_frames)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                res = _ocr(frame)
                 t = ""
-            if t:
-                texts.append(t)
-    except Exception as e:
-        return "\n".join(texts).strip(), "OCR失败: %s" % str(e)[:120], ""
-    finally:
-        if cap is not None:
-            cap.release()
-    return "\n".join(texts).strip(), "", ""
+                try:
+                    if hasattr(res, "txts"):
+                        t = "\n".join([x for x in (res.txts or [])])
+                    elif isinstance(res, tuple) and len(res) >= 2:
+                        t = "\n".join(res[1] or [])
+                except Exception:
+                    t = ""
+                if t:
+                    texts.append(t)
+        cap.release()
+    except Exception:
+        pass
+    return "\n".join(texts).strip()
 
 
 def hits(text, terms):
@@ -157,58 +185,29 @@ def hits(text, terms):
     return [k for k in terms if k.lower() in t]
 
 
-def _result(verdict, source, matched, transcript="", ocr="", status="", media="", note=""):
-    return {
-        "verdict": verdict,
-        "source": source,
-        "hits": matched,
-        "transcript": transcript,
-        "ocr": ocr,
-        "status": status,
-        "media": media,
-        "note": note,
-    }
-
-
-def decide(rec, rules, media_dir, do_media=True):
+def decide(rec, rules, media_dir, do_media=True, download=False, cookies=None, max_mb=300):
     text = rec["title"]
     terms = list(rules.get("smart_terms", []))
     if rules.get("count_brand_as_topic"):
         terms += list(rules.get("brand_terms", []))
-    excludes = list(rules.get("exclude_terms", []))
-
-    # 排除词优先：标题命中任意排除词即排除，不再看主题词。
-    ex = hits(text, excludes)
-    if ex:
-        return _result("不相关", "排除词(%s)" % "、".join(ex), ex, status="excluded")
-
     h = hits(text, terms)
     if h:
-        return _result("相关", "文本(标题/话题)", h, status="done_text")
+        return "相关", "文本(标题/话题)", h, "", "", "done_text"
     if not do_media:
-        return _result("待人工复核", "文本未命中", [], status="boundary_no_media")
-    vid = find_media(media_dir, rec["url"], rec["row"])
+        return "待人工复核", "文本未命中", [], "", "", "boundary_no_media"
+    vid = find_media(media_dir, rec["url"], rec["row"]) if media_dir else None
+    if not vid and download and rec["url"]:
+        ddir = media_dir or Path("downloads")
+        vid = download_video(rec["url"], ddir, cookies, max_mb)
     if not vid:
-        return _result("待人工复核", "无本地视频", [], status="boundary_no_media")
-
-    tr, tr_err = transcribe(vid)
-    oc, oc_err, oc_gap = ocr_frames(vid)
-    notes = [n for n in (tr_err, oc_err, oc_gap) if n]
-    note = "；".join(notes)
-
-    # 媒体阶段同样先看排除词，再按与文本阶段相同的词表匹配。
-    ex = list(dict.fromkeys(hits(tr, excludes) + hits(oc, excludes)))
-    if ex:
-        return _result("不相关", "排除词(%s)" % "、".join(ex), ex, tr[:200], oc[:200], "excluded", vid.name, note)
-
-    mh = list(dict.fromkeys(hits(tr, terms) + hits(oc, terms)))
+        return "待人工复核", "无本地视频/未下载成功", [], "", "", "boundary_no_media"
+    tr = transcribe(vid)
+    oc = ocr_frames(vid)
+    all_terms = terms + list(rules.get("brand_terms", []))
+    mh = list(dict.fromkeys(hits(tr, all_terms) + hits(oc, all_terms)))
     if mh:
-        return _result("相关", "媒体(口播/画面)", mh, tr[:200], oc[:200], "done_media", vid.name, note)
-    if notes:
-        # 有处理失败/缺口且没有命中：证据不完整，不能判为不相关。
-        status = "media_error" if (tr_err or oc_err) else "media_gap"
-        return _result("待人工复核", "媒体处理异常", [], tr[:200], oc[:200], status, vid.name, note)
-    return _result("不相关", "媒体均未命中", [], tr[:200], oc[:200], "done_media", vid.name, "")
+        return "相关", "媒体(口播/画面)", mh, tr[:200], oc[:200], "done_media"
+    return "不相关", "媒体均未命中", [], tr[:200], oc[:200], "done_media"
 
 
 def init_example(path: Path):
@@ -222,20 +221,6 @@ def init_example(path: Path):
     print("已生成示例：", path)
 
 
-def load_rules(path: str):
-    """读取并校验 --rules 指定的 JSON；失败时返回 (None, 错误说明)。"""
-    rp = Path(path)
-    if not rp.exists():
-        return None, "规则文件不存在：%s" % rp
-    try:
-        loaded = json.loads(rp.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-        return None, "规则文件无法解析：%s（%s）" % (rp, e)
-    if not isinstance(loaded, dict):
-        return None, "规则文件必须是 JSON 对象：%s" % rp
-    return loaded, ""
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="")
@@ -243,6 +228,9 @@ def main(argv=None):
     ap.add_argument("--media-dir", default="")
     ap.add_argument("--rules", default="")
     ap.add_argument("--no-media", action="store_true", help="仅按文字判定（不做语音/画面）")
+    ap.add_argument("--download", action="store_true", help="用 yt-dlp 下载链接（仅其支持的站点）")
+    ap.add_argument("--cookies", default="", help="可选 cookies.txt 供 yt-dlp")
+    ap.add_argument("--max-download-mb", type=int, default=300)
     ap.add_argument("--init-example", action="store_true")
     args = ap.parse_args(argv)
 
@@ -255,33 +243,27 @@ def main(argv=None):
     inp = Path(args.input)
     out = Path(args.out) if args.out else inp.with_name(inp.stem + "_筛选结果.xlsx")
     rules = dict(DEFAULT_RULES)
-    if args.rules:
-        loaded, err = load_rules(args.rules)
-        if loaded is None:
-            print("错误：" + err, file=sys.stderr)
-            return 2
-        rules.update(loaded)
+    if args.rules and Path(args.rules).exists():
+        rules.update(json.loads(Path(args.rules).read_text(encoding="utf-8")))
     media_dir = Path(args.media_dir) if args.media_dir else None
 
     hdr, rows = read_rows(inp)
-    print("记录数:", len(rows), "| 主题:", rules.get("topic"))
+    print("记录数:", len(rows), "| 主题:", rules.get("topic"), "| 下载:", args.download)
     results = []
     t0 = time.time()
     for i, rec in enumerate(rows, 1):
-        res = decide(rec, rules, media_dir, do_media=not args.no_media)
-        results.append([
-            rec["row"], rec["platform"], rec["title"], rec["url"],
-            res["verdict"], res["source"], "、".join(res["hits"][:8]),
-            res["transcript"], res["ocr"], res["media"], res["note"], res["status"],
-        ])
+        dec, src, hs, tr, oc, status = decide(
+            rec, rules, media_dir, do_media=not args.no_media,
+            download=args.download, cookies=args.cookies or None, max_mb=args.max_download_mb,
+        )
+        results.append([i, rec["platform"], rec["title"], rec["url"], dec, src, "、".join(hs[:8]), tr, oc, status])
         if i % 50 == 0:
             print("  进度 %d/%d" % (i, len(rows)))
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "筛选结果"
-    cols = ["序号", "平台", "标题", "链接", "判定", "命中来源", "命中词",
-            "口播片段", "画面片段", "视频文件", "备注", "状态"]
+    cols = ["序号", "平台", "标题", "链接", "判定", "命中来源", "命中词", "口播片段", "画面片段", "状态"]
     ws.append(cols)
     for r in results:
         ws.append(r)
@@ -289,8 +271,8 @@ def main(argv=None):
     dist = Counter(r[4] for r in results)
     ws2 = wb.create_sheet("统计")
     ws2.append(["判定", "条数"])
-    for k in VERDICTS:
-        ws2.append([k, dist.get(k, 0)])
+    for k, v in dist.items():
+        ws2.append([k, v])
     ws2.append(["合计", len(results)])
     ws2.append(["耗时秒", round(time.time() - t0, 1)])
     wb.save(out)

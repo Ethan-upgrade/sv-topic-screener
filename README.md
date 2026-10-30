@@ -700,3 +700,12 @@ you need per-row files for duplicated links.
 
 No license file is included in this repository, and GitHub reports no license for it.
 Treat the code as all rights reserved unless the author states otherwise.
+
+## 可选：自动下载（yt-dlp）
+```
+python screener.py --input 数据.xlsx --download
+python screener.py --input 数据.xlsx --download --cookies cookies.txt --max-download-mb 300
+```
+- 仅对 **yt-dlp 支持的站点**有效（YouTube/TikTok 等）。
+- 抖音/小红书/视频号等强反爬站点常失败或需登录 Cookie（本工具不内置平台逆向）。
+- 下载失败的行标记为「待人工复核」。
