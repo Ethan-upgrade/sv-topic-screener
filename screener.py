@@ -98,7 +98,7 @@ def download_video(url: str, outdir: Path, cookies: str = None, max_mb: int = 30
     except Exception:
         return None
     opts = {
-        "format": "best[ext=mp4]/best",
+        "format": "best",
         "outtmpl": str(outdir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
