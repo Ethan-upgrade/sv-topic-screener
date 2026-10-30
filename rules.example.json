@@ -1,0 +1,11 @@
+{
+  "topic": "智驾",
+  "smart_terms": [
+    "智驾", "智能驾驶", "辅助驾驶", "自动驾驶", "高阶智驾", "领航辅助", "领航",
+    "自动泊车", "记忆泊车", "代客泊车", "泊车", "激光雷达", "世界模型",
+    "NOA", "NGP", "NCA", "ACC", "AEB", "APA", "AVP", "LCC", "LKA", "TJA"
+  ],
+  "brand_terms": ["Momenta"],
+  "exclude_terms": [],
+  "count_brand_as_topic": false
+}
