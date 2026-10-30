@@ -6,6 +6,6 @@
     "NOA", "NGP", "NCA", "ACC", "AEB", "APA", "AVP", "LCC", "LKA", "TJA"
   ],
   "brand_terms": ["Momenta"],
-  "exclude_terms": [],
+  "exclude_terms": ["纯话题标签", "无关样例词"],
   "count_brand_as_topic": false
 }
