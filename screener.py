@@ -73,7 +73,7 @@ def read_rows(path: Path):
         title = str(r[ti]) if ti is not None and ti < len(r) and r[ti] is not None else ""
         url = str(r[ui]) if ui is not None and ui < len(r) and r[ui] is not None else ""
         plat = str(r[pi]) if pi is not None and pi < len(r) and r[pi] is not None else ""
-        out.append({"row": n, "title": title, "url": url, "platform": plat})
+        out.append({"row": n, "seq": len(out) + 1, "title": title, "url": url, "platform": plat})
     return hdr, out
 
 
@@ -201,7 +201,7 @@ def decide(rec, rules, media_dir, do_media=True, download=False, cookies=None, m
         return "相关", "文本(标题/话题)", h, "", "", "done_text"
     if not do_media:
         return "待人工复核", "文本未命中", [], "", "", "boundary_no_media"
-    vid = find_media(media_dir, rec["url"], rec["row"]) if media_dir else None
+    vid = find_media(media_dir, rec["url"], rec.get("seq", rec["row"])) if media_dir else None
     if not vid and download and rec["url"]:
         ddir = media_dir or Path("downloads")
         vid = download_video(rec["url"], ddir, cookies, max_mb)

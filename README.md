@@ -353,7 +353,7 @@ strings for every row.
 | 7 | `命中词` | Matched terms joined with `、`, **first 8 only** | `screener.py:274` |
 | 8 | `口播片段` | First 200 characters of the transcript, empty in text-only or no-media rows | `screener.py:206-211` |
 | 9 | `画面片段` | First 200 characters of the OCR text, same caveat | `screener.py:206-211` |
-| 10 | `视频文件` | Matched local filename (`<media-id>.mp4` or `<row>.mp4`); empty when no video was looked up | `screener.py:275` |
+| 10 | `视频文件` | Matched local filename (`<media-id>.mp4` or `<data index, 1-based>.mp4`); empty when no video was looked up | `screener.py:275` |
 | 11 | `备注` | Media-processing note: ASR/OCR failure text or the OCR zero-frame gap | `screener.py:275` |
 | 12 | `状态` | `done_text`, `boundary_no_media`, `excluded`, `done_media`, `media_error`, `media_gap` | `screener.py:181-211` |
 
@@ -491,7 +491,7 @@ backends and numeric/image helpers are installed transitively by the two engines
 ```
 
 The second command is text-only in effect (no `--media-dir`), so every row that misses on
-text lands in `待人工复核`. The third reads `media\<media-id>.mp4` or `media\<row>.mp4`.
+text lands in `待人工复核`. The third reads `media\<media-id>.mp4` or `media\<data index, 1-based>.mp4`.
 
 ---
 
@@ -599,9 +599,9 @@ candidate is `<excel row number>.mp4`, so the first data row (row 2 of the sheet
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Every row is `待人工复核` with `无本地视频` | `--media-dir` points at the wrong folder, or filenames match neither candidate | Use `<media-id>.mp4` or `<row>.mp4` directly inside the given directory |
+| Every row is `待人工复核` with `无本地视频` | `--media-dir` points at the wrong folder, or filenames match neither candidate | Use `<media-id>.mp4` or `<data index, 1-based>.mp4` directly inside the given directory |
 | A video exists but is ignored | Extension is not `.mp4`, or the file is zero bytes | Re-encode to `.mp4`; the size check is strict |
-| The wrong file is analysed | A URL-derived `<media-id>.mp4` exists but is stale; it is preferred over `<row>.mp4` | Delete the stale file or name by row explicitly |
+| The wrong file is analysed | A URL-derived `<media-id>.mp4` exists but is stale; it is preferred over `<data index, 1-based>.mp4` | Delete the stale file or name by row explicitly |
 | All titles come out empty | Header is not on row 1, or the header text is not an exact alias | Move the header to row 1; rename `视频标题（必填）` to `视频标题` |
 | Run stops with `规则文件不存在` / `规则文件无法解析` / `必须是 JSON 对象` | The `--rules` path is missing, the JSON is invalid, or the top level is not an object | Fix the path or JSON; the tool exits 2 and writes no output |
 | Editing `smart_terms` had no effect | The rules list replaces the default list wholesale; a typo in a key creates a new unused key | Print `rules` or check spelling against the key table |
@@ -688,7 +688,7 @@ count brands as topic evidence everywhere, or edit `brand_terms` to change the l
 `excluded` and records the matched term in `命中来源` / `命中词`.
 
 **Can two videos have the same media id?** Not by accident: the candidate filename comes
-from the URL, so identical URLs resolve to the same file. Use the `<row>.mp4` convention if
+from the URL, so identical URLs resolve to the same file. Use the `<data index, 1-based>.mp4` convention if
 you need per-row files for duplicated links.
 
 **Does it run on macOS or Linux?** `screener.py` is pure Python and portable. Only
