@@ -9,9 +9,11 @@
 
 输入：Excel（含 标题 / 链接 / 平台 列，列名支持常见别名）
 可选：
-  --media-dir  本地视频目录（<内容ID>.mp4 / <行号>.mp4）
-  --download   对每行链接用 yt-dlp 自动下载（仅 yt-dlp 支持的站点；抖音/小红书/视频号等强反爬站点可能失败或需 Cookie）
-  --cookies    可选 cookies.txt 供 yt-dlp 使用
+  --media-dir             本地视频目录（<内容ID>.mp4 / <数据序号(从1开始)>.mp4）
+  --download              对每行链接用 yt-dlp 自动下载
+  --cookies               cookies.txt（Netscape 格式）供 yt-dlp
+  --cookies-from-browser  从浏览器读取 Cookie（如 chrome / edge / firefox）
+  --js-runtime            yt-dlp 的 JS 运行时（YouTube 常用：deno 或 node）
 输出：逐条结果 Excel。
 
 用法：
@@ -19,17 +21,19 @@
   python screener.py --input 数据.xlsx
   python screener.py --input 数据.xlsx --media-dir 视频目录
   python screener.py --input 数据.xlsx --download
+  python screener.py --input 数据.xlsx --download --js-runtime node
   python screener.py --input 数据.xlsx --download --cookies cookies.txt
+  python screener.py --input 数据.xlsx --download --cookies-from-browser chrome
 """
 from __future__ import annotations
-import argparse, json, os, re, sys, time
+import argparse, json, os, re, subprocess, sys, time
+from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
-from pathlib import Path
 
 import openpyxl
 
@@ -77,61 +81,54 @@ def read_rows(path: Path):
     return hdr, out
 
 
-def find_media(media_dir: Path, url: str, row: int):
+def find_media(media_dir: Path, url: str, seq: int):
     if not media_dir or not media_dir.exists():
         return None
     item_id = ""
     m = re.search(r"(?:video|note|explore|sph)/([A-Za-z0-9_-]{6,})", url or "")
     if m:
         item_id = m.group(1)
-    for cand in ([item_id + ".mp4"] if item_id else []) + [f"{row}.mp4"]:
+    for cand in ([item_id + ".mp4"] if item_id else []) + [f"{seq}.mp4", f"{seq}.mkv", f"{seq}.webm", f"{seq}.mov"]:
         p = media_dir / cand
         if p.exists() and p.stat().st_size > 0:
             return p
     return None
 
 
-def download_video(url: str, outdir: Path, cookies: str = None, max_mb: int = 300):
-    """用公开的 yt-dlp 下载视频（仅支持 yt-dlp 支持的站点）。失败返回 None，不抛异常。"""
+def download_video(url: str, outdir: Path, cookies: str = None, max_mb: int = 300,
+                   js_runtime: str = None, cookies_from_browser: str = None):
+    """用公开的 yt-dlp(CLI，经本环境 python -m yt_dlp) 下载视频。失败返回 None，不抛异常。"""
     if not url:
-        return None
-    try:
-        import yt_dlp
-    except Exception:
         return None
     try:
         outdir.mkdir(parents=True, exist_ok=True)
     except Exception:
         return None
-    opts = {
-        "format": "best",
-        "outtmpl": str(outdir / "%(id)s.%(ext)s"),
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "socket_timeout": 25,
-        "retries": 2,
-        "max_filesize": max_mb * 1024 * 1024,
-    }
+    cmd = [sys.executable, "-m", "yt_dlp",
+           "-f", "best",
+           "-o", str(outdir / "%(id)s.%(ext)s"),
+           "--no-playlist", "--quiet", "--no-warnings",
+           "--socket-timeout", "30", "--retries", "2",
+           "--max-filesize", str(max_mb) + "M"]
     if cookies and Path(cookies).exists():
-        opts["cookiefile"] = str(cookies)
+        cmd += ["--cookies", str(cookies)]
+    if cookies_from_browser:
+        cmd += ["--cookies-from-browser", cookies_from_browser]
+    if js_runtime:
+        cmd += ["--js-runtimes", js_runtime]
+    cmd.append(url)
+    before = set(str(p) for p in outdir.glob("*"))
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-        if not info:
-            return None
-        fid = info.get("id")
-        if fid:
-            for p in sorted(outdir.glob(str(fid) + ".*")):
-                if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".m4a", ".mov"):
-                    return p
-        for d in (info.get("requested_downloads") or []):
-            fp = d.get("filepath")
-            if fp and Path(fp).exists():
-                return Path(fp)
+        subprocess.run(cmd, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         return None
-    return None
+    files = [p for p in outdir.glob("*") if p.is_file() and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".m4a", ".mov")]
+    new = [p for p in files if str(p) not in before]
+    cand = new or files
+    if not cand:
+        return None
+    cand.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return cand[0]
 
 
 _whisper = None
@@ -191,7 +188,8 @@ def hits(text, terms):
     return [k for k in terms if k.lower() in t]
 
 
-def decide(rec, rules, media_dir, do_media=True, download=False, cookies=None, max_mb=300):
+def decide(rec, rules, media_dir, do_media=True, download=False, cookies=None,
+           cookies_from_browser=None, js_runtime=None, max_mb=300):
     text = rec["title"]
     terms = list(rules.get("smart_terms", []))
     if rules.get("count_brand_as_topic"):
@@ -204,7 +202,7 @@ def decide(rec, rules, media_dir, do_media=True, download=False, cookies=None, m
     vid = find_media(media_dir, rec["url"], rec.get("seq", rec["row"])) if media_dir else None
     if not vid and download and rec["url"]:
         ddir = media_dir or Path("downloads")
-        vid = download_video(rec["url"], ddir, cookies, max_mb)
+        vid = download_video(rec["url"], ddir, cookies, max_mb, js_runtime, cookies_from_browser)
     if not vid:
         return "待人工复核", "无本地视频/未下载成功", [], "", "", "boundary_no_media"
     tr = transcribe(vid)
@@ -236,6 +234,8 @@ def main(argv=None):
     ap.add_argument("--no-media", action="store_true", help="仅按文字判定（不做语音/画面）")
     ap.add_argument("--download", action="store_true", help="用 yt-dlp 下载链接（仅其支持的站点）")
     ap.add_argument("--cookies", default="", help="可选 cookies.txt 供 yt-dlp")
+    ap.add_argument("--cookies-from-browser", default="", help="从浏览器读取 Cookie，如 chrome / edge / firefox")
+    ap.add_argument("--js-runtime", default="", help="yt-dlp JS 运行时，如 deno / node（YouTube 常用）")
     ap.add_argument("--max-download-mb", type=int, default=300)
     ap.add_argument("--init-example", action="store_true")
     args = ap.parse_args(argv)
@@ -260,7 +260,9 @@ def main(argv=None):
     for i, rec in enumerate(rows, 1):
         dec, src, hs, tr, oc, status = decide(
             rec, rules, media_dir, do_media=not args.no_media,
-            download=args.download, cookies=args.cookies or None, max_mb=args.max_download_mb,
+            download=args.download, cookies=args.cookies or None,
+            cookies_from_browser=args.cookies_from_browser or None,
+            js_runtime=args.js_runtime or None, max_mb=args.max_download_mb,
         )
         results.append([i, rec["platform"], rec["title"], rec["url"], dec, src, "、".join(hs[:8]), tr, oc, status])
         if i % 50 == 0:

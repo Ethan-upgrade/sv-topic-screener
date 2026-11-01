@@ -666,3 +666,13 @@ python screener.py [--input PATH] [--out PATH] [--media-dir PATH]
 
 仓库中没有许可证文件，GitHub 也显示该项目没有 license。除非作者另有说明，否则视为
 保留所有权利。
+
+## YouTube 与登录 Cookie（可选）
+- **YouTube 需要 yt-dlp 的 JS 运行时**：安装 Deno（推荐）或 Node，运行时传 `--js-runtime deno`（或 `node`）。
+- 需要登录/地区限制的内容：用 `--cookies cookies.txt`，或 `--cookies-from-browser chrome`（支持 chrome/edge/firefox 等）。
+- 示例：
+```
+python screener.py --input 数据.xlsx --download --js-runtime node --cookies-from-browser chrome
+```
+- 仍不支持：抖音/小红书/视频号等强反爬站点（需平台逆向，本公开版不内置）。
+- 若 YouTube 返回 403（反爬），用 `--cookies-from-browser chrome`（或 `--cookies cookies.txt`）带登录态。
